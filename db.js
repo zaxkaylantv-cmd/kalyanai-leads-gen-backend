@@ -16,9 +16,9 @@ function getDb() {
   return new sqlite3.Database(dbPath);
 }
 
-function initDb() {
-  const db = getDb();
+const db = getDb();
 
+function initDb() {
   db.serialize(() => {
     db.run(`
       CREATE TABLE IF NOT EXISTS sources (
@@ -122,7 +122,102 @@ function initDb() {
   return db;
 }
 
+function updateProspectStatus(id, status) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      'UPDATE prospects SET status = ? WHERE id = ?',
+      [status, id],
+      function updateCallback(err) {
+        if (err) return reject(err);
+        if (this.changes === 0) return resolve(null);
+
+        db.get(
+          'SELECT * FROM prospects WHERE id = ?',
+          [id],
+          (err2, row) => {
+            if (err2) return reject(err2);
+            resolve(row || null);
+          },
+        );
+      },
+    );
+  });
+}
+
+function getProspectById(id) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      'SELECT * FROM prospects WHERE id = ?',
+      [id],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row || null);
+      },
+    );
+  });
+}
+
+function getProspectNotes(prospectId) {
+  return new Promise((resolve, reject) => {
+    db.all(
+      `
+      SELECT
+        id,
+        prospectId AS prospectId,
+        note AS content,
+        createdAt AS createdAt
+      FROM prospect_notes
+      WHERE prospectId = ?
+      ORDER BY datetime(createdAt) DESC
+      `,
+      [prospectId],
+      (err, rows) => {
+        if (err) return reject(err);
+        resolve(rows || []);
+      },
+    );
+  });
+}
+
+function addProspectNote(prospectId, content) {
+  return new Promise((resolve, reject) => {
+    const id = `note_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+    db.run(
+      `
+      INSERT INTO prospect_notes (id, prospectId, note)
+      VALUES (?, ?, ?)
+      `,
+      [id, prospectId, content],
+      function insertNoteCallback(err) {
+        if (err) return reject(err);
+
+        db.get(
+          `
+          SELECT
+            id,
+            prospectId AS prospectId,
+            note AS content,
+            createdAt AS createdAt
+          FROM prospect_notes
+          WHERE id = ?
+          `,
+          [id],
+          (err2, row) => {
+            if (err2) return reject(err2);
+            resolve(row);
+          },
+        );
+      },
+    );
+  });
+}
+
 module.exports = {
   getDb,
   initDb,
+  updateProspectStatus,
+  getProspectNotes,
+  addProspectNote,
+  getProspectById,
 };

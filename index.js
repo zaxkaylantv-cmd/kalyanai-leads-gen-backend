@@ -2,10 +2,17 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const { initDb } = require('./db');
+const {
+  initDb,
+  updateProspectStatus,
+  getProspectNotes,
+  addProspectNote,
+  getProspectById,
+} = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3004;
+const LEADDESK_API_BASE = process.env.LEADDESK_API_BASE || 'http://127.0.0.1:3003';
 
 app.use(cors());
 app.use(express.json());
@@ -237,6 +244,100 @@ app.get('/ai/campaigns/:id/suggest-posts', (req, res) => {
 
     res.json(suggestions);
   });
+});
+
+app.post('/ai/sources/:sourceId/enrich-preview', (req, res) => {
+  const { sourceId } = req.params;
+
+  db.all(
+    'SELECT * FROM prospects WHERE sourceId = ? ORDER BY createdAt DESC',
+    [sourceId],
+    (err, rows) => {
+      if (err) {
+        console.error('Failed to fetch prospects for enrichment', err);
+        return res.status(500).json({ error: 'Failed to fetch prospects for enrichment' });
+      }
+
+      if (!rows || rows.length === 0) {
+        return res.json([]);
+      }
+
+      const previews = rows.map((p) => {
+        const companyName = p.companyName || null;
+        const contactName = p.contactName || null;
+        const email = p.email || null;
+        const website = p.website || null;
+        const status = p.status || null;
+
+        const tagsText = `${p.tags || ''} ${p.companyName || ''} ${p.role || ''}`;
+        const lower = tagsText.toLowerCase();
+
+        let fitScore = 40;
+
+        if (email && String(email).trim() !== '') {
+          fitScore += 20;
+        }
+        if (p.phone && String(p.phone).trim() !== '') {
+          fitScore += 10;
+        }
+        if (website && String(website).trim() !== '') {
+          fitScore += 10;
+        }
+
+        if (lower.includes('agency') || lower.includes('marketing')) {
+          fitScore += 10;
+        } else if (lower.includes('consult') || lower.includes('advisory')) {
+          fitScore += 10;
+        } else if (lower.includes('account') || lower.includes('finance')) {
+          fitScore += 10;
+        }
+
+        if (fitScore < 0) fitScore = 0;
+        if (fitScore > 100) fitScore = 100;
+
+        let fitLabel = 'cool';
+        if (fitScore >= 80) {
+          fitLabel = 'hot';
+        } else if (fitScore >= 60) {
+          fitLabel = 'warm';
+        } else if (fitScore < 40) {
+          fitLabel = 'cold';
+        }
+
+        let primaryPain = 'Too much manual work in sales, operations, and follow-up.';
+
+        if (lower.includes('agency') || lower.includes('marketing')) {
+          primaryPain = 'Juggling too many clients and campaigns manually.';
+        } else if (lower.includes('account') || lower.includes('finance')) {
+          primaryPain = 'Heavy admin around invoices, statements, and reconciliations.';
+        } else if (lower.includes('consult') || lower.includes('advisory')) {
+          primaryPain = 'Lots of meetings and follow-ups that don’t turn into structured actions.';
+        }
+
+        const nameForSummary = companyName || 'This company';
+
+        const summary =
+          `${nameForSummary} looks like a ${fitLabel} fit. ` +
+          `They likely suffer from: ${primaryPain} ` +
+          `AI-led automation and better workflows could free time and create cleaner follow-up.`;
+
+        return {
+          prospectId: p.id,
+          companyName,
+          contactName,
+          email,
+          website,
+          status,
+          fitScore,
+          fitLabel,
+          primaryPain,
+          summary,
+        };
+      });
+
+      res.json(previews);
+    },
+  );
 });
 
 app.get('/social-posts', (req, res) => {
@@ -494,6 +595,248 @@ app.post('/prospects', (req, res) => {
       );
     },
   );
+});
+
+app.patch('/prospects/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
+
+    if (!status || typeof status !== 'string') {
+      return res.status(400).json({ error: 'status is required' });
+    }
+
+    const allowedStatuses = ['uncontacted', 'contacted', 'qualified', 'bad-fit'];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status value' });
+    }
+
+    const updated = await updateProspectStatus(id, status);
+    if (!updated) {
+      return res.status(404).json({ error: 'Prospect not found' });
+    }
+
+    return res.json(updated);
+  } catch (err) {
+    console.error('Error in PATCH /prospects/:id', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/prospects/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const notes = await getProspectNotes(id);
+    return res.json(notes);
+  } catch (err) {
+    console.error('Error in GET /prospects/:id/notes', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/prospects/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content } = req.body || {};
+
+    if (!content || typeof content !== 'string' || !content.trim()) {
+      return res.status(400).json({ error: 'content is required' });
+    }
+
+    const note = await addProspectNote(id, content.trim());
+    return res.status(201).json(note);
+  } catch (err) {
+    console.error('Error in POST /prospects/:id/notes', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/prospects/:id/push-to-leaddesk', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const prospect = await getProspectById(id);
+    if (!prospect) {
+      return res.status(404).json({ error: 'Prospect not found' });
+    }
+
+    const body = {
+      name: prospect.contactName || prospect.companyName || 'Lead from Lead Gen',
+      company: prospect.companyName || prospect.contactName || 'Lead Gen Prospect',
+      email: prospect.email || null,
+      phone: prospect.phone || null,
+      value: null,
+      source: prospect.sourceId || 'lead-gen',
+      createdAt: prospect.createdAt || new Date().toISOString(),
+      address: null,
+      ownerName:
+        prospect.ownerName && typeof prospect.ownerName === 'string' && prospect.ownerName.trim()
+          ? prospect.ownerName.trim()
+          : 'Unassigned',
+    };
+
+    const response = await fetch(`${LEADDESK_API_BASE}/leads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      console.error('Lead Desk create lead failed', response.status, text);
+      return res.status(502).json({
+        error: 'Failed to create lead in Lead Desk',
+        status: response.status,
+      });
+    }
+
+    const leaddeskLead = await response.json();
+
+    return res.status(201).json({
+      prospect,
+      leaddeskLead,
+    });
+  } catch (err) {
+    console.error('Error in POST /prospects/:id/push-to-leaddesk', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
+  const { sourceId } = req.params;
+  const { prospects } = req.body || {};
+
+  if (!Array.isArray(prospects) || prospects.length === 0) {
+    return res.status(400).json({ error: 'prospects array is required' });
+  }
+
+  const validProspects = [];
+
+  for (const raw of prospects) {
+    if (!raw || typeof raw !== 'object') continue;
+
+    const {
+      companyName,
+      contactName,
+      role,
+      email,
+      phone,
+      website,
+      tags,
+      status,
+      ownerName,
+    } = raw;
+
+    const hasIdentifier =
+      (companyName && String(companyName).trim() !== '') ||
+      (contactName && String(contactName).trim() !== '') ||
+      (email && String(email).trim() !== '');
+
+    if (!hasIdentifier) {
+      continue;
+    }
+
+    const id = generateId('pros');
+
+    let tagsString = null;
+    if (Array.isArray(tags)) {
+      tagsString = tags.join(',');
+    } else if (typeof tags === 'string') {
+      tagsString = tags;
+    }
+
+    const finalStatus =
+      typeof status === 'string' && status.trim() !== ''
+        ? status.trim()
+        : 'uncontacted';
+
+    validProspects.push({
+      id,
+      sourceId: sourceId || null,
+      companyName: companyName ?? null,
+      contactName: contactName ?? null,
+      role: role ?? null,
+      email: email ?? null,
+      phone: phone ?? null,
+      website: website ?? null,
+      tags: tagsString,
+      status: finalStatus,
+      ownerName: ownerName ?? null,
+    });
+  }
+
+  if (validProspects.length === 0) {
+    return res.status(400).json({ error: 'No valid prospects to import' });
+  }
+
+  db.serialize(() => {
+    const insertSql = `
+        INSERT INTO prospects (
+          id,
+          sourceId,
+          companyName,
+          contactName,
+          role,
+          email,
+          phone,
+          website,
+          tags,
+          status,
+          ownerName
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+
+    const stmt = db.prepare(insertSql);
+
+    try {
+      for (const p of validProspects) {
+        stmt.run(
+          p.id,
+          p.sourceId,
+          p.companyName,
+          p.contactName,
+          p.role,
+          p.email,
+          p.phone,
+          p.website,
+          p.tags,
+          p.status,
+          p.ownerName,
+        );
+      }
+
+      stmt.finalize(err => {
+        if (err) {
+          console.error('Failed to bulk import prospects (finalize)', err);
+          return res.status(500).json({ error: 'Failed to bulk import prospects' });
+        }
+
+        const ids = validProspects.map(p => p.id);
+        const placeholders = ids.map(() => '?').join(',');
+
+        db.all(
+          `SELECT * FROM prospects WHERE id IN (${placeholders})`,
+          ids,
+          (selectErr, rows) => {
+            if (selectErr) {
+              console.error('Failed to fetch imported prospects', selectErr);
+              return res.status(500).json({ error: 'Failed to bulk import prospects' });
+            }
+            res.status(201).json(rows);
+          },
+        );
+      });
+    } catch (e) {
+      console.error('Failed to bulk import prospects', e);
+      try {
+        stmt.finalize();
+      } catch (_) {
+        // ignore
+      }
+      return res.status(500).json({ error: 'Failed to bulk import prospects' });
+    }
+  });
 });
 
 app.listen(PORT, () => {
