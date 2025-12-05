@@ -14,6 +14,7 @@ const {
   getSourceById,
   getDomainProfile,
   upsertDomainProfile,
+  updateSourceIcp,
 } = require('./db');
 
 const app = express();
@@ -388,6 +389,48 @@ app.post('/sources', (req, res) => {
       );
     },
   );
+});
+
+app.patch('/sources/:id', (req, res) => {
+  const { id } = req.params;
+  const {
+    targetIndustry,
+    companySize,
+    roleFocus,
+    mainAngle,
+  } = req.body || {};
+
+  const icpFields = {};
+
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'targetIndustry')) {
+    icpFields.targetIndustry = targetIndustry;
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'companySize')) {
+    icpFields.companySize = companySize;
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'roleFocus')) {
+    icpFields.roleFocus = roleFocus;
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'mainAngle')) {
+    icpFields.mainAngle = mainAngle;
+  }
+
+  if (Object.keys(icpFields).length === 0) {
+    return res.status(400).json({ error: 'No ICP fields provided' });
+  }
+
+  updateSourceIcp(id, icpFields, (err, updated) => {
+    if (err) {
+      console.error('Error updating source ICP:', err);
+      return res.status(500).json({ error: 'Failed to update source' });
+    }
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Source not found' });
+    }
+
+    return res.json(updated);
+  });
 });
 
 app.get('/campaigns', (req, res) => {

@@ -259,6 +259,58 @@ function upsertDomainProfile(profile, cb) {
   );
 }
 
+function updateSourceIcp(id, icpFields, cb) {
+  const fields = [];
+  const params = [];
+
+  if (Object.prototype.hasOwnProperty.call(icpFields, 'targetIndustry')) {
+    fields.push('targetIndustry = ?');
+    params.push(icpFields.targetIndustry ?? null);
+  }
+  if (Object.prototype.hasOwnProperty.call(icpFields, 'companySize')) {
+    fields.push('companySize = ?');
+    params.push(icpFields.companySize ?? null);
+  }
+  if (Object.prototype.hasOwnProperty.call(icpFields, 'roleFocus')) {
+    fields.push('roleFocus = ?');
+    params.push(icpFields.roleFocus ?? null);
+  }
+  if (Object.prototype.hasOwnProperty.call(icpFields, 'mainAngle')) {
+    fields.push('mainAngle = ?');
+    params.push(icpFields.mainAngle ?? null);
+  }
+
+  if (fields.length === 0) {
+    return cb ? cb(null, null) : null;
+  }
+
+  params.push(id);
+
+  const sql = `UPDATE sources SET ${fields.join(', ')} WHERE id = ?`;
+
+  db.run(sql, params, function (err) {
+    if (err) {
+      if (cb) return cb(err);
+      throw err;
+    }
+
+    if (this.changes === 0) {
+      if (cb) return cb(null, null);
+      return null;
+    }
+
+    db.get(
+      'SELECT * FROM sources WHERE id = ?',
+      [id],
+      (err2, row) => {
+        if (cb) return cb(err2, row || null);
+        if (err2) throw err2;
+        return row || null;
+      },
+    );
+  });
+}
+
 function getProspectNotes(prospectId) {
   return new Promise((resolve, reject) => {
     db.all(
@@ -340,4 +392,5 @@ module.exports = {
   getSourceById,
   getDomainProfile,
   upsertDomainProfile,
+  updateSourceIcp,
 };
