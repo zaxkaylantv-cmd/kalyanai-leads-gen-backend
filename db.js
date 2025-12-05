@@ -31,6 +31,19 @@ function initDb() {
       )
     `);
 
+    function safeAddColumn(columnDef) {
+      db.run(`ALTER TABLE sources ADD COLUMN ${columnDef}`, (err) => {
+        if (err && !String(err.message).toLowerCase().includes('duplicate column')) {
+          console.error('Error adding column to sources:', columnDef, err);
+        }
+      });
+    }
+
+    safeAddColumn('targetIndustry TEXT');
+    safeAddColumn('companySize TEXT');
+    safeAddColumn('roleFocus TEXT');
+    safeAddColumn('mainAngle TEXT');
+
     db.run(`
       CREATE TABLE IF NOT EXISTS prospects (
         id TEXT PRIMARY KEY,
@@ -117,6 +130,16 @@ function initDb() {
         FOREIGN KEY (postId) REFERENCES social_posts(id) ON DELETE CASCADE
       )
     `);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS domains (
+        domain TEXT PRIMARY KEY,
+        raw_excerpt TEXT,
+        lastFetchedAt TEXT,
+        status TEXT,
+        error TEXT
+      )
+    `);
   });
 
   return db;
@@ -191,7 +214,7 @@ function getSourceById(id) {
   return new Promise((resolve, reject) => {
     db.get(
       `
-        SELECT id, name, type, description, metadata, createdAt
+        SELECT id, name, type, description, metadata, createdAt, targetIndustry, companySize, roleFocus, mainAngle
         FROM sources
         WHERE id = ?
       `,
@@ -202,6 +225,38 @@ function getSourceById(id) {
       },
     );
   });
+}
+
+function getDomainProfile(domain, cb) {
+  db.get(
+    `
+      SELECT domain, raw_excerpt, lastFetchedAt, status, error
+      FROM domains
+      WHERE domain = ?
+    `,
+    [domain],
+    (err, row) => {
+      if (cb) return cb(err, row || null);
+      if (err) throw err;
+      return row || null;
+    },
+  );
+}
+
+function upsertDomainProfile(profile, cb) {
+  const { domain, raw_excerpt, lastFetchedAt, status, error } = profile || {};
+
+  db.run(
+    `
+      INSERT OR REPLACE INTO domains (domain, raw_excerpt, lastFetchedAt, status, error)
+      VALUES (?, ?, ?, ?, ?)
+    `,
+    [domain, raw_excerpt || null, lastFetchedAt || null, status || null, error || null],
+    (err) => {
+      if (cb) return cb(err);
+      if (err) throw err;
+    },
+  );
 }
 
 function getProspectNotes(prospectId) {
@@ -283,4 +338,6 @@ module.exports = {
   getProspectById,
   getCampaignById,
   getSourceById,
+  getDomainProfile,
+  upsertDomainProfile,
 };

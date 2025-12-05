@@ -12,6 +12,8 @@ const {
   getProspectById,
   getCampaignById,
   getSourceById,
+  getDomainProfile,
+  upsertDomainProfile,
 } = require('./db');
 
 const app = express();
@@ -155,6 +157,103 @@ Avoid any text inside the image (no big slogans or UI text), focus on strong, cl
   return url;
 }
 
+function htmlToText(html, maxLength = 8000) {
+  if (!html) return '';
+  const withoutScripts = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '');
+  let text = withoutScripts.replace(/<[^>]+>/g, ' ');
+  text = text.replace(/\s+/g, ' ').trim();
+  if (text.length > maxLength) {
+    text = text.slice(0, maxLength);
+  }
+  return text;
+}
+
+function buildUrlFromDomain(domain) {
+  if (!domain) return null;
+  let d = domain.trim();
+  if (!d) return null;
+  if (!/^https?:\/\//i.test(d)) {
+    d = `https://${d}`;
+  }
+  return d;
+}
+
+async function fetchAndCacheDomainProfile(domain) {
+  const url = buildUrlFromDomain(domain);
+  if (!url) {
+    const invalidProfile = {
+      domain,
+      raw_excerpt: '',
+      lastFetchedAt: new Date().toISOString(),
+      status: 'invalid',
+      error: 'invalid_domain',
+    };
+
+    await new Promise((resolve, reject) => {
+      upsertDomainProfile(invalidProfile, (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+
+    return invalidProfile;
+  }
+
+  let raw_excerpt = '';
+  let status = 'ok';
+  let error = null;
+
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) {
+      status = 'error';
+      error = `HTTP ${res.status}`;
+    } else {
+      const html = await res.text();
+      raw_excerpt = htmlToText(html);
+    }
+  } catch (err) {
+    status = 'error';
+    error = err.message || String(err);
+  }
+
+  const profile = {
+    domain,
+    raw_excerpt,
+    lastFetchedAt: new Date().toISOString(),
+    status,
+    error,
+  };
+
+  await new Promise((resolve, reject) => {
+    upsertDomainProfile(profile, (err2) => {
+      if (err2) return reject(err2);
+      resolve();
+    });
+  });
+
+  return profile;
+}
+
+async function getOrFetchDomainProfile(domain) {
+  if (!domain) return null;
+
+  const existing = await new Promise((resolve, reject) => {
+    getDomainProfile(domain, (err, row) => {
+      if (err) return reject(err);
+      resolve(row || null);
+    });
+  });
+
+  if (existing && existing.status === 'ok' && existing.raw_excerpt) {
+    return existing;
+  }
+
+  return fetchAndCacheDomainProfile(domain);
+}
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -163,10 +262,36 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/debug/domain-profile', async (req, res) => {
+  try {
+    const { domain } = req.query;
+    if (!domain) {
+      return res.status(400).json({ error: 'Missing domain query param' });
+    }
+
+    const profile = await getOrFetchDomainProfile(domain);
+    if (!profile) {
+      return res.status(404).json({ error: 'No profile for this domain' });
+    }
+
+    return res.json({
+      domain: profile.domain,
+      status: profile.status,
+      lastFetchedAt: profile.lastFetchedAt,
+      error: profile.error,
+      raw_excerpt_length: profile.raw_excerpt ? profile.raw_excerpt.length : 0,
+      raw_excerpt_preview: profile.raw_excerpt ? profile.raw_excerpt.slice(0, 500) : '',
+    });
+  } catch (err) {
+    console.error('Error in /debug/domain-profile:', err);
+    return res.status(500).json({ error: 'Failed to fetch domain profile' });
+  }
+});
+
 app.get('/sources', (req, res) => {
   db.all(
     `
-      SELECT id, name, type, description, metadata, createdAt
+      SELECT id, name, type, description, metadata, createdAt, targetIndustry, companySize, roleFocus, mainAngle
       FROM sources
       ORDER BY datetime(createdAt) DESC
     `,
@@ -205,7 +330,16 @@ app.get('/sources/:id', (req, res) => {
 });
 
 app.post('/sources', (req, res) => {
-  const { name, type, description, metadata } = req.body || {};
+  const {
+    name,
+    type,
+    description,
+    metadata,
+    targetIndustry,
+    companySize,
+    roleFocus,
+    mainAngle,
+  } = req.body || {};
 
   if (!name) {
     return res.status(400).json({ error: 'name is required' });
@@ -217,10 +351,20 @@ app.post('/sources', (req, res) => {
 
   db.run(
     `
-      INSERT INTO sources (id, name, type, description, metadata)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO sources (id, name, type, description, metadata, targetIndustry, companySize, roleFocus, mainAngle)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
-    [id, name, type || null, description || null, metadataValue],
+    [
+      id,
+      name,
+      type || null,
+      description || null,
+      metadataValue,
+      targetIndustry || null,
+      companySize || null,
+      roleFocus || null,
+      mainAngle || null,
+    ],
     function insertCallback(err) {
       if (err) {
         console.error('Error creating source:', err);
@@ -229,7 +373,7 @@ app.post('/sources', (req, res) => {
 
       db.get(
         `
-          SELECT id, name, type, description, metadata, createdAt
+          SELECT id, name, type, description, metadata, createdAt, targetIndustry, companySize, roleFocus, mainAngle
           FROM sources
           WHERE id = ?
         `,
@@ -357,98 +501,277 @@ app.post('/ai/campaigns/:id/suggest-posts', async (req, res) => {
   }
 });
 
-app.post('/ai/sources/:sourceId/enrich-preview', (req, res) => {
-  const { sourceId } = req.params;
+app.post('/ai/sources/:sourceId/enrich-preview', async (req, res) => {
+  try {
+    const { sourceId } = req.params;
 
-  db.all(
-    'SELECT * FROM prospects WHERE sourceId = ? ORDER BY createdAt DESC',
-    [sourceId],
-    (err, rows) => {
-      if (err) {
-        console.error('Failed to fetch prospects for enrichment', err);
-        return res.status(500).json({ error: 'Failed to fetch prospects for enrichment' });
+    const prospects = await new Promise((resolve, reject) => {
+      db.all(
+        'SELECT * FROM prospects WHERE sourceId = ? ORDER BY createdAt DESC',
+        [sourceId],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows || []);
+        },
+      );
+    });
+
+    if (!prospects || prospects.length === 0) {
+      return res.json([]);
+    }
+
+    let source = null;
+    try {
+      source = await getSourceById(sourceId);
+    } catch (err) {
+      console.error('Failed to fetch source for enrichment context', err);
+    }
+
+    const icpContextLines = [];
+    if (source && source.name) icpContextLines.push(`Campaign/source name: ${source.name}.`);
+    if (source && source.targetIndustry) icpContextLines.push(`Target industry: ${source.targetIndustry}.`);
+    if (source && source.companySize) icpContextLines.push(`Typical company size: ${source.companySize}.`);
+    if (source && source.roleFocus) icpContextLines.push(`Primary buyer persona / role focus: ${source.roleFocus}.`);
+    if (source && source.mainAngle) icpContextLines.push(`Primary commercial angle: ${source.mainAngle}.`);
+
+    const sourceIcpContext =
+      icpContextLines.length > 0
+        ? icpContextLines.join(' ')
+        : 'No additional ICP context provided; assume common B2B pains around operations, sales process, and customer experience.';
+
+    const getDomainForProspect = (prospect) => {
+      if (prospect.website) {
+        try {
+          let url = prospect.website.trim();
+          if (!/^https?:\/\//i.test(url)) {
+            url = `https://${url}`;
+          }
+          const parsed = new URL(url);
+          return parsed.hostname.replace(/^www\./i, '');
+        } catch (err) {
+          // ignore invalid website
+        }
       }
 
-      if (!rows || rows.length === 0) {
-        return res.json([]);
+      if (prospect.email && prospect.email.includes('@')) {
+        const domainPart = prospect.email.split('@')[1].trim();
+        if (domainPart) {
+          return domainPart.replace(/^www\./i, '');
+        }
       }
 
-      const previews = rows.map((p) => {
-        const companyName = p.companyName || null;
-        const contactName = p.contactName || null;
-        const email = p.email || null;
-        const website = p.website || null;
-        const status = p.status || null;
+      return null;
+    };
 
-        const tagsText = `${p.tags || ''} ${p.companyName || ''} ${p.role || ''}`;
-        const lower = tagsText.toLowerCase();
+    const domainMap = new Map();
+    for (const prospect of prospects) {
+      const domain = getDomainForProspect(prospect);
+      if (domain && !domainMap.has(domain)) {
+        domainMap.set(domain, null);
+      }
+    }
 
-        let fitScore = 40;
+    for (const domain of domainMap.keys()) {
+      try {
+        const profile = await getOrFetchDomainProfile(domain);
+        domainMap.set(domain, profile || null);
+      } catch (err) {
+        console.error('Error fetching domain profile for', domain, err);
+        domainMap.set(domain, null);
+      }
+    }
 
-        if (email && String(email).trim() !== '') {
-          fitScore += 20;
-        }
-        if (p.phone && String(p.phone).trim() !== '') {
-          fitScore += 10;
-        }
-        if (website && String(website).trim() !== '') {
-          fitScore += 10;
-        }
+    const buildHeuristicPreview = (p) => {
+      const companyName = p.companyName || null;
+      const contactName = p.contactName || null;
+      const email = p.email || null;
+      const website = p.website || null;
+      const status = p.status || null;
 
-        if (lower.includes('agency') || lower.includes('marketing')) {
-          fitScore += 10;
-        } else if (lower.includes('consult') || lower.includes('advisory')) {
-          fitScore += 10;
-        } else if (lower.includes('account') || lower.includes('finance')) {
-          fitScore += 10;
-        }
+      const tagsText = `${p.tags || ''} ${p.companyName || ''} ${p.role || ''}`;
+      const lower = tagsText.toLowerCase();
 
-        if (fitScore < 0) fitScore = 0;
-        if (fitScore > 100) fitScore = 100;
+      let fitScore = 40;
 
-        let fitLabel = 'cool';
-        if (fitScore >= 80) {
-          fitLabel = 'hot';
-        } else if (fitScore >= 60) {
-          fitLabel = 'warm';
-        } else if (fitScore < 40) {
-          fitLabel = 'cold';
-        }
+      if (email && String(email).trim() !== '') {
+        fitScore += 20;
+      }
+      if (p.phone && String(p.phone).trim() !== '') {
+        fitScore += 10;
+      }
+      if (website && String(website).trim() !== '') {
+        fitScore += 10;
+      }
 
-        let primaryPain = 'Too much manual work in sales, operations, and follow-up.';
+      if (lower.includes('agency') || lower.includes('marketing')) {
+        fitScore += 10;
+      } else if (lower.includes('consult') || lower.includes('advisory')) {
+        fitScore += 10;
+      } else if (lower.includes('account') || lower.includes('finance')) {
+        fitScore += 10;
+      }
 
-        if (lower.includes('agency') || lower.includes('marketing')) {
-          primaryPain = 'Juggling too many clients and campaigns manually.';
-        } else if (lower.includes('account') || lower.includes('finance')) {
-          primaryPain = 'Heavy admin around invoices, statements, and reconciliations.';
-        } else if (lower.includes('consult') || lower.includes('advisory')) {
-          primaryPain = "Lots of meetings and follow-ups that don't turn into structured actions.";
-        }
+      if (fitScore < 0) fitScore = 0;
+      if (fitScore > 100) fitScore = 100;
 
-        const nameForSummary = companyName || 'This company';
+      let fitLabel = 'cool';
+      if (fitScore >= 80) {
+        fitLabel = 'hot';
+      } else if (fitScore >= 60) {
+        fitLabel = 'warm';
+      } else if (fitScore < 40) {
+        fitLabel = 'cold';
+      }
 
-        const summary =
-          `${nameForSummary} looks like a ${fitLabel} fit. ` +
-          `They likely suffer from: ${primaryPain} ` +
-          `AI-led automation and better workflows could free time and create cleaner follow-up.`;
+      let primaryPain = 'Too much manual work in sales, operations, and follow-up.';
 
-        return {
-          prospectId: p.id,
-          companyName,
-          contactName,
-          email,
-          website,
-          status,
-          fitScore,
-          fitLabel,
-          primaryPain,
-          summary,
-        };
+      if (lower.includes('agency') || lower.includes('marketing')) {
+        primaryPain = 'Juggling too many clients and campaigns manually.';
+      } else if (lower.includes('account') || lower.includes('finance')) {
+        primaryPain = 'Heavy admin around invoices, statements, and reconciliations.';
+      } else if (lower.includes('consult') || lower.includes('advisory')) {
+        primaryPain = "Lots of meetings and follow-ups that don't turn into structured actions.";
+      }
+
+      const nameForSummary = companyName || 'This company';
+
+      const summary =
+        `${nameForSummary} looks like a ${fitLabel} fit. ` +
+        `They likely suffer from: ${primaryPain} ` +
+        `AI-led automation and better workflows could free time and create cleaner follow-up.`;
+
+      return {
+        prospectId: p.id,
+        companyName,
+        contactName,
+        email,
+        website,
+        status,
+        fitScore,
+        fitLabel,
+        primaryPain,
+        summary,
+      };
+    };
+
+    if (!openai || !process.env.OPENAI_API_KEY) {
+      const previews = prospects.map((p) => buildHeuristicPreview(p));
+      return res.json(previews);
+    }
+
+    const prospectBlocks = prospects
+      .map((p) => {
+        const domain = getDomainForProspect(p);
+        const profile = domain ? domainMap.get(domain) : null;
+        const websiteExcerpt =
+          profile && profile.raw_excerpt ? profile.raw_excerpt.slice(0, 1500) : '';
+
+        const safeExcerpt =
+          websiteExcerpt && websiteExcerpt.trim() !== '' ? websiteExcerpt : 'none available';
+
+        return [
+          `PROSPECT_ID: ${p.id}`,
+          `COMPANY_NAME: ${p.companyName || 'Unknown company'}`,
+          `CONTACT_NAME: ${p.contactName || 'Unknown contact'}`,
+          `EMAIL: ${p.email || 'Unknown email'}`,
+          `WEBSITE: ${p.website || 'Unknown website'}`,
+          `WEBSITE_DOMAIN: ${domain || 'none'}`,
+          `WEBSITE_EXCERPT: "${safeExcerpt.replace(/"/g, '\\"')}"`,
+          '---',
+        ].join('\n');
+      })
+      .join('\n');
+
+    const systemPrompt = `
+You are an assistant helping Kalyan AI assess B2B prospects for fit.
+Return JSON ONLY, no extra text.
+Rules:
+- primaryPain must be a real business problem (manual processes/inefficiency, poor lead handling, weak operations, revenue leakage, poor customer experience).
+- NEVER use or imply "lack of publicly available information", "limited online presence", "insufficient data", inability to research, or mention Google/LinkedIn/research limits.
+- If website info is weak or missing, infer likely pains for this type of company; keep language neutral and do not comment on their online presence.
+CAMPAIGN CONTEXT:
+${sourceIcpContext}
+Use this context to prioritize pains, fitScore, and messaging that match the target industry/role/angle.
+For each prospect, output:
+- prospectId: the provided PROSPECT_ID
+- fitScore: integer 0-100
+- fitLabel: one of hot, warm, cool, cold
+- primaryPain: short description of the likely main pain (no meta-comments about missing data)
+- summary: 2–3 sentence summary tailored to the company; uncertainty should be implicit ("may", "likely") without apologizing for missing info
+Use any WEBSITE_EXCERPT if available to ground your assessment.
+`;
+
+    const userPrompt = `
+Here are prospects to enrich:
+
+${prospectBlocks}
+
+Return a JSON array of objects in the same order with keys: prospectId, fitScore, fitLabel, primaryPain, summary.
+`;
+
+    let aiPreviews = null;
+
+    try {
+      const response = await openai.responses.create({
+        model: 'gpt-4.1-mini',
+        input: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
       });
 
-      res.json(previews);
-    },
-  );
+      const output =
+        response.output?.[0]?.content?.[0]?.text ||
+        response.output?.[0]?.content?.[0]?.string ||
+        '';
+
+      if (output) {
+        try {
+          const parsed = JSON.parse(output);
+          if (Array.isArray(parsed)) {
+            aiPreviews = parsed;
+          }
+        } catch (err) {
+          console.warn('Failed to parse AI enrichment JSON, falling back to heuristic.', err);
+        }
+      }
+    } catch (err) {
+      console.error('Error calling OpenAI for enrichment preview', err);
+    }
+
+    const previews =
+      aiPreviews && Array.isArray(aiPreviews)
+        ? prospects.map((p) => {
+            const ai = aiPreviews.find((item) => item && item.prospectId === p.id);
+            const fallback = buildHeuristicPreview(p);
+            if (!ai) return fallback;
+
+            const fitScore =
+              typeof ai.fitScore === 'number' ? Math.min(Math.max(ai.fitScore, 0), 100) : fallback.fitScore;
+            const fitLabel = ai.fitLabel || fallback.fitLabel;
+            const primaryPain = ai.primaryPain || fallback.primaryPain;
+            const summary = ai.summary || fallback.summary;
+
+            return {
+              prospectId: p.id,
+              companyName: p.companyName || null,
+              contactName: p.contactName || null,
+              email: p.email || null,
+              website: p.website || null,
+              status: p.status || null,
+              fitScore,
+              fitLabel,
+              primaryPain,
+              summary,
+            };
+          })
+        : prospects.map((p) => buildHeuristicPreview(p));
+
+    return res.json(previews);
+  } catch (err) {
+    console.error('Error in POST /ai/sources/:sourceId/enrich-preview', err);
+    return res.status(500).json({ error: 'Failed to fetch prospects for enrichment' });
+  }
 });
 
 app.post('/ai/image-from-idea', async (req, res) => {
