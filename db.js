@@ -144,6 +144,36 @@ function updateProspectStatus(id, status) {
   });
 }
 
+function updateSocialPostStatus(id, status) {
+  return new Promise((resolve, reject) => {
+    const validStatuses = ['draft', 'scheduled', 'sent', 'archived'];
+    if (!validStatuses.includes(status)) {
+      return reject(new Error('INVALID_STATUS'));
+    }
+
+    const sql = 'UPDATE social_posts SET status = ? WHERE id = ?';
+    const params = [status, id];
+
+    db.run(sql, params, function (err) {
+      if (err) {
+        return reject(err);
+      }
+      if (this.changes === 0) {
+        return resolve(null);
+      }
+
+      db.get(
+        'SELECT * FROM social_posts WHERE id = ?',
+        [id],
+        (err2, row) => {
+          if (err2) return reject(err2);
+          resolve(row || null);
+        },
+      );
+    });
+  });
+}
+
 function getProspectById(id) {
   return new Promise((resolve, reject) => {
     db.get(
@@ -213,11 +243,26 @@ function addProspectNote(prospectId, content) {
   });
 }
 
+function getCampaignById(id) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      'SELECT * FROM campaigns WHERE id = ?',
+      [id],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row || null);
+      },
+    );
+  });
+}
+
 module.exports = {
   getDb,
   initDb,
   updateProspectStatus,
+  updateSocialPostStatus,
   getProspectNotes,
   addProspectNote,
   getProspectById,
+  getCampaignById,
 };

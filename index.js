@@ -1,13 +1,16 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const OpenAI = require('openai');
 
 const {
   initDb,
   updateProspectStatus,
+  updateSocialPostStatus,
   getProspectNotes,
   addProspectNote,
   getProspectById,
+  getCampaignById,
 } = require('./db');
 
 const app = express();
@@ -18,6 +21,10 @@ app.use(cors());
 app.use(express.json());
 
 const db = initDb();
+const openai =
+  process.env.OPENAI_API_KEY
+    ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    : null;
 
 function generateId(prefix) {
   const random = Math.random().toString(36).substring(2, 8);
@@ -25,12 +32,126 @@ function generateId(prefix) {
   return `${prefix}_${timestamp}_${random}`;
 }
 
-function describeCampaign(campaign) {
-  const name = campaign.name || 'this campaign';
-  const objective = campaign.objective || '';
-  const target = campaign.targetDescription || '';
+async function generateCampaignSuggestionsWithOpenAI(campaignId, fallbackSuggestions) {
+  if (!openai || !process.env.OPENAI_API_KEY) {
+    console.warn('OPENAI_API_KEY missing – using fallback suggestions.');
+    return fallbackSuggestions;
+  }
 
-  return { name, objective, target };
+  try {
+    const prompt = `
+You are helping a B2B AI consultancy called Kalyan AI plan social posts for a lead generation campaign.
+
+Kalyan AI offers bespoke hosted AI software to automate processes and streamline operations, saving time and money, improving customer experience and increasing profit without taking on new staff.
+
+For campaign id: ${campaignId}
+
+Create exactly 4 social post ideas:
+1) LinkedIn - educational story style
+2) Twitter (X) - short and punchy hook
+3) Facebook - conversational with soft CTA
+4) Instagram - caption style with emojis
+
+For each suggestion, include:
+- channel
+- tone
+- content
+- imageIdea: a short description of the visual that should accompany the post (no more than 2 lines).
+
+Return STRICT JSON ONLY, no extra text.
+Shape:
+
+{
+  "suggestions": [
+    { "channel": "linkedin",  "tone": "educational",    "content": "...", "imageIdea": "..." },
+    { "channel": "twitter",   "tone": "punchy",         "content": "...", "imageIdea": "..." },
+    { "channel": "facebook",  "tone": "conversational", "content": "...", "imageIdea": "..." },
+    { "channel": "instagram", "tone": "caption",        "content": "...", "imageIdea": "..." }
+  ]
+}
+`;
+
+    const response = await openai.responses.create({
+      model: 'gpt-4.1-mini',
+      input: prompt,
+    });
+
+    const output =
+      response.output?.[0]?.content?.[0]?.text ||
+      response.output?.[0]?.content?.[0]?.string;
+    const raw = typeof output === 'string' ? output : '';
+
+    if (!raw) {
+      console.warn('OpenAI suggestions returned empty output, using fallback.');
+      return fallbackSuggestions;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.warn('Failed to parse OpenAI suggestions JSON, using fallback.', e);
+      return fallbackSuggestions;
+    }
+
+    if (!parsed || !Array.isArray(parsed.suggestions)) {
+      console.warn('OpenAI suggestions JSON shape invalid, using fallback.');
+      return fallbackSuggestions;
+    }
+
+    const suggestions = parsed.suggestions
+      .filter((s) => s && typeof s.content === 'string')
+      .map((s) => ({
+        channel: s.channel || 'linkedin',
+        tone: s.tone || undefined,
+        content: s.content,
+        imageIdea: s.imageIdea || s.image_idea || null,
+      }));
+
+    return suggestions.length > 0 ? suggestions : fallbackSuggestions;
+  } catch (err) {
+    console.error('Error calling OpenAI for campaign suggestions:', err);
+    return fallbackSuggestions;
+  }
+}
+
+async function generateImageFromIdea(idea, channel) {
+  if (!openai || !process.env.OPENAI_API_KEY) {
+    throw new Error('OPENAI_NOT_CONFIGURED');
+  }
+
+  const prompt = `
+Create a clean, modern marketing visual for a B2B AI consultancy called Kalyan AI.
+
+Kalyan AI offers bespoke hosted AI software to automate processes and streamline operations, saving time and money, improving customer experience and increasing profit without taking on new staff.
+
+Channel: ${channel || 'generic'}
+Visual idea: ${idea}
+
+The style should be professional, minimal, and suitable for LinkedIn / Twitter / Facebook / Instagram.
+Avoid any text inside the image (no big slogans or UI text), focus on strong, clear visuals.
+`;
+
+  const response = await openai.images.generate({
+    model: 'gpt-image-1',
+    prompt,
+    size: '1024x1024',
+    n: 1,
+  });
+
+  const url =
+    response.data &&
+    Array.isArray(response.data) &&
+    response.data[0] &&
+    response.data[0].url
+      ? response.data[0].url
+      : null;
+
+  if (!url) {
+    throw new Error('NO_IMAGE_URL');
+  }
+
+  return url;
 }
 
 app.get('/health', (req, res) => {
@@ -184,66 +305,55 @@ app.post('/campaigns', (req, res) => {
   });
 });
 
-app.get('/ai/campaigns/:id/suggest-posts', (req, res) => {
-  const { id } = req.params;
+app.post('/ai/campaigns/:id/suggest-posts', async (req, res) => {
+  try {
+    const { id } = req.params;
 
-  db.get('SELECT * FROM campaigns WHERE id = ?', [id], (err, campaign) => {
-    if (err) {
-      console.error('Failed to fetch campaign for AI suggestions', err);
-      return res.status(500).json({ error: 'Failed to fetch campaign' });
-    }
-
-    if (!campaign) {
-      return res.status(404).json({ error: 'Campaign not found' });
-    }
-
-    const { name, objective, target } = describeCampaign(campaign);
-
-    const baseTone = 'calm advisory';
-    const now = new Date();
-    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    const inThreeDays = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
-    const inSevenDays = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-    const suggestions = [
+    const fallbackSuggestions = [
       {
-        id: generateId('suggest'),
-        campaignId: campaign.id,
         channel: 'linkedin',
-        tone: baseTone,
+        tone: 'educational',
         content:
-          `Many ${target || 'businesses'} want to use AI but feel lost in the noise. ` +
-          `In this campaign (${name}), we explain one practical workflow we automate ` +
-          `to win back time and reduce errors. If you could fix one messy process in your business, what would it be?`,
-        scheduledForSuggestion: tomorrow.toISOString(),
+          'Many service businesses are still juggling manual processes, even though it slows everything down. This campaign explores how bespoke hosted AI software can automate the boring work, save time and money, improve customer experience and increase profit without taking on new staff. If this resonates, comment or reply and I will share a simple outline for your context.',
+        imageIdea:
+          'Clean, modern illustration of a small business team looking at a simple AI dashboard showing time saved and happier customers.',
       },
       {
-        id: generateId('suggest'),
-        campaignId: campaign.id,
-        channel: 'linkedin',
-        tone: baseTone,
+        channel: 'twitter',
+        tone: 'punchy',
         content:
-          `Quick story from our "${name}" campaign: we recently mapped a client's processes, ` +
-          `automated the boring admin, and freed their team to focus on revenue. ` +
-          `${objective ? `Goal: ${objective}. ` : ''}` +
-          `Curious what that would look like in your world?`,
-        scheduledForSuggestion: inThreeDays.toISOString(),
+          'Too much manual work, not enough time, no budget to hire? Bespoke hosted AI software can automate your processes, improve CX and grow profit without extra headcount. This campaign is built to show real examples. #AI #automation',
+        imageIdea:
+          'Minimal graphic with the words "Less manual work, more growth" and a subtle AI icon.',
       },
       {
-        id: generateId('suggest'),
-        campaignId: campaign.id,
-        channel: 'linkedin',
-        tone: baseTone,
+        channel: 'facebook',
+        tone: 'conversational',
         content:
-          `If you lead an SME and keep hearing about AI but don't know where to start, you're not alone. ` +
-          `Our "${name}" campaign is focused on building one or two high-impact automations, not "AI for everything". ` +
-          `Reply with "map" and I’ll send a simple checklist we use in our first calls.`,
-        scheduledForSuggestion: inSevenDays.toISOString(),
+          'We are working with businesses who feel stuck between "too many manual tasks" and "not ready to hire more people". This campaign shares how bespoke hosted AI software can quietly automate core workflows, free your team up and make customers happier without increasing staff costs. Comment or message if you would like ideas for your own business.',
+        imageIdea:
+          'Friendly photo of a small team in a relaxed meeting, with a laptop screen showing an automation workflow.',
+      },
+      {
+        channel: 'instagram',
+        tone: 'caption',
+        content:
+          'Too many tasks. Not enough hours. No room to hire.\n\nBespoke hosted AI software can automate your processes, save time and money and level up your customer experience without growing the team.\n\nWant ideas for your business? DM "AI" and we will map a few quick wins.',
+        imageIdea:
+          'Before/after carousel concept: first slide cluttered to-do list, second slide clean screen with "AI-powered workflow" highlighted.',
       },
     ];
 
-    res.json(suggestions);
-  });
+    const suggestions = await generateCampaignSuggestionsWithOpenAI(
+      id,
+      fallbackSuggestions,
+    );
+
+    return res.json(suggestions);
+  } catch (err) {
+    console.error('Error in POST /ai/campaigns/:id/suggest-posts', err);
+    return res.status(500).json({ error: 'Failed to generate AI suggestions' });
+  }
 });
 
 app.post('/ai/sources/:sourceId/enrich-preview', (req, res) => {
@@ -311,7 +421,7 @@ app.post('/ai/sources/:sourceId/enrich-preview', (req, res) => {
         } else if (lower.includes('account') || lower.includes('finance')) {
           primaryPain = 'Heavy admin around invoices, statements, and reconciliations.';
         } else if (lower.includes('consult') || lower.includes('advisory')) {
-          primaryPain = 'Lots of meetings and follow-ups that don’t turn into structured actions.';
+          primaryPain = "Lots of meetings and follow-ups that don't turn into structured actions.";
         }
 
         const nameForSummary = companyName || 'This company';
@@ -338,6 +448,31 @@ app.post('/ai/sources/:sourceId/enrich-preview', (req, res) => {
       res.json(previews);
     },
   );
+});
+
+app.post('/ai/image-from-idea', async (req, res) => {
+  try {
+    const { idea, channel } = req.body || {};
+
+    if (!idea || typeof idea !== 'string' || !idea.trim()) {
+      return res.status(400).json({ error: 'idea is required' });
+    }
+
+    try {
+      const imageUrl = await generateImageFromIdea(idea.trim(), channel);
+      return res.json({ imageUrl });
+    } catch (err) {
+      if (err && err.message === 'OPENAI_NOT_CONFIGURED') {
+        console.error('OpenAI not configured for image generation');
+        return res.status(500).json({ error: 'AI image generation is not configured' });
+      }
+      console.error('Error generating image from idea:', err);
+      return res.status(500).json({ error: 'Failed to generate image' });
+    }
+  } catch (err) {
+    console.error('Error in POST /ai/image-from-idea', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/social-posts', (req, res) => {
@@ -423,6 +558,36 @@ app.post('/social-posts', (req, res) => {
       },
     );
   });
+});
+
+app.patch('/social-posts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
+
+    if (!status || typeof status !== 'string') {
+      return res.status(400).json({ error: 'status is required' });
+    }
+
+    try {
+      const updated = await updateSocialPostStatus(id, status);
+      if (!updated) {
+        return res.status(404).json({ error: 'Social post not found' });
+      }
+      return res.json(updated);
+    } catch (err) {
+      if (err && err.message === 'INVALID_STATUS') {
+        return res
+          .status(400)
+          .json({ error: 'Invalid status value for social post' });
+      }
+      console.error('Error in updateSocialPostStatus:', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  } catch (err) {
+    console.error('Error in PATCH /social-posts/:id', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 app.get('/prospects', (req, res) => {
