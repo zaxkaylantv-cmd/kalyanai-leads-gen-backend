@@ -187,6 +187,23 @@ function getProspectById(id) {
   });
 }
 
+function getSourceById(id) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `
+        SELECT id, name, type, description, metadata, createdAt
+        FROM sources
+        WHERE id = ?
+      `,
+      [id],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row || null);
+      },
+    );
+  });
+}
+
 function getProspectNotes(prospectId) {
   return new Promise((resolve, reject) => {
     db.all(
@@ -265,4 +282,5 @@ module.exports = {
   addProspectNote,
   getProspectById,
   getCampaignById,
+  getSourceById,
 };

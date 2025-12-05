@@ -11,6 +11,7 @@ const {
   addProspectNote,
   getProspectById,
   getCampaignById,
+  getSourceById,
 } = require('./db');
 
 const app = express();
@@ -825,13 +826,16 @@ app.post('/prospects/:id/push-to-leaddesk', async (req, res) => {
       return res.status(404).json({ error: 'Prospect not found' });
     }
 
+    const source = prospect.sourceId ? await getSourceById(prospect.sourceId) : null;
+    const sourceName = (source && source.name) || prospect.sourceId || 'lead-gen';
+
     const body = {
       name: prospect.contactName || prospect.companyName || 'Lead from Lead Gen',
       company: prospect.companyName || prospect.contactName || 'Lead Gen Prospect',
       email: prospect.email || null,
       phone: prospect.phone || null,
       value: null,
-      source: prospect.sourceId || 'lead-gen',
+      source: sourceName,
       createdAt: prospect.createdAt || new Date().toISOString(),
       address: null,
       ownerName:
