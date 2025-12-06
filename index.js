@@ -732,6 +732,11 @@ Rules:
 - primaryPain must be a real business problem (manual processes/inefficiency, poor lead handling, weak operations, revenue leakage, poor customer experience).
 - NEVER use or imply "lack of publicly available information", "limited online presence", "insufficient data", inability to research, or mention Google/LinkedIn/research limits.
 - If website info is weak or missing, infer likely pains for this type of company; keep language neutral and do not comment on their online presence.
+Tone and language constraints:
+- Describe pains as opportunities to improve or streamline, not as failures. Use phrasing like "opportunity to streamline X", "may benefit from simplifying Y", "could reduce manual steps in Z", "may want better visibility into ...".
+- Avoid harsh/judgemental words or phrases such as: inefficient, inefficiencies, poor, weak, broken, outdated, struggling, chaotic, disorganized, problematic, "issues with", "common in X industry", or "typical of X companies".
+- primaryPain must focus on an underlying business process but be framed as an opportunity to improve (e.g. "Opportunity to streamline how they handle inbound leads", not "Their lead handling is inefficient").
+- Any subject lines, summaries, or copy must not blame or criticise the company; position Kalyan AI as helping them streamline or get more from what they already do.
 CAMPAIGN CONTEXT:
 ${sourceIcpContext}
 Use this context to prioritize pains, fitScore, and messaging that match the target industry/role/angle.

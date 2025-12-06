@@ -174,26 +174,39 @@ function updateSocialPostStatus(id, status) {
       return reject(new Error('INVALID_STATUS'));
     }
 
-    const sql = 'UPDATE social_posts SET status = ? WHERE id = ?';
-    const params = [status, id];
+    db.get(
+      'SELECT * FROM social_posts WHERE id = ?',
+      [id],
+      (err, existing) => {
+        if (err) return reject(err);
+        if (!existing) return resolve(null);
 
-    db.run(sql, params, function (err) {
-      if (err) {
-        return reject(err);
-      }
-      if (this.changes === 0) {
-        return resolve(null);
-      }
+        const nowIso = new Date().toISOString();
+        const nextSentAt =
+          status === 'sent' && !existing.sentAt ? nowIso : existing.sentAt || null;
 
-      db.get(
-        'SELECT * FROM social_posts WHERE id = ?',
-        [id],
-        (err2, row) => {
-          if (err2) return reject(err2);
-          resolve(row || null);
-        },
-      );
-    });
+        const sql = 'UPDATE social_posts SET status = ?, sentAt = ? WHERE id = ?';
+        const params = [status, nextSentAt, id];
+
+        db.run(sql, params, function (updateErr) {
+          if (updateErr) {
+            return reject(updateErr);
+          }
+          if (this.changes === 0) {
+            return resolve(null);
+          }
+
+          db.get(
+            'SELECT * FROM social_posts WHERE id = ?',
+            [id],
+            (err2, row) => {
+              if (err2) return reject(err2);
+              resolve(row || null);
+            },
+          );
+        });
+      },
+    );
   });
 }
 
