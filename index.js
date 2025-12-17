@@ -1558,6 +1558,16 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
 
   const existingLookup = new Map();
   const suppressedLookup = new Set();
+  const importStats = {
+    received: Array.isArray(prospects) ? prospects.length : 0,
+    valid: 0,
+    inserted: 0,
+    skippedInvalid: 0,
+    skippedDupEmail: 0,
+    skippedDupFallback: 0,
+    skippedSuppressed: 0,
+    skippedOther: 0,
+  };
 
   db.all(
     'SELECT id, normalizedEmail, normalizedDomain, normalizedContactName, suppressedAt FROM prospects',
@@ -1583,7 +1593,10 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
       const seen = new Set();
 
       for (const raw of prospects) {
-        if (!raw || typeof raw !== 'object') continue;
+        if (!raw || typeof raw !== 'object') {
+          importStats.skippedOther++;
+          continue;
+        }
 
         const {
           companyName,
@@ -1604,8 +1617,10 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
           (email && String(email).trim() !== '');
 
         if (!hasIdentifier) {
+          importStats.skippedInvalid++;
           continue;
         }
+        importStats.valid++;
 
         const normalizedEmail = normalizeEmail(email);
         const normalizedDomain = extractDomainFromWebsiteOrEmail(website, email);
@@ -1617,16 +1632,25 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
             ? `dn:${normalizedDomain}:${normalizedContactName}`
             : null;
 
-        const duplicateKey =
-          (keyEmail && existingLookup.has(keyEmail)) ||
-          (keyDomain && existingLookup.has(keyDomain)) ||
-          (keyEmail && seen.has(keyEmail)) ||
-          (keyDomain && seen.has(keyDomain));
+        const emailDuplicate =
+          keyEmail && (existingLookup.has(keyEmail) || seen.has(keyEmail));
+        const fallbackDuplicate =
+          !keyEmail && keyDomain && (existingLookup.has(keyDomain) || seen.has(keyDomain));
+        const duplicateKey = emailDuplicate || fallbackDuplicate;
         const suppressedHit =
           (keyEmail && suppressedLookup.has(keyEmail)) ||
-          (keyDomain && suppressedLookup.has(keyDomain));
+          (!keyEmail && keyDomain && suppressedLookup.has(keyDomain));
 
         if (duplicateKey || suppressedHit) {
+          if (suppressedHit) {
+            importStats.skippedSuppressed++;
+          } else if (emailDuplicate) {
+            importStats.skippedDupEmail++;
+          } else if (fallbackDuplicate) {
+            importStats.skippedDupFallback++;
+          } else {
+            importStats.skippedOther++;
+          }
           continue;
         }
 
@@ -1723,14 +1747,30 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
             );
           }
 
-          stmt.finalize(err => {
-            if (err) {
-              console.error('Failed to bulk import prospects (finalize)', err);
-              return res.status(500).json({ error: 'Failed to bulk import prospects' });
-            }
+            stmt.finalize(err => {
+              if (err) {
+                console.error('Failed to bulk import prospects (finalize)', err);
+                return res.status(500).json({ error: 'Failed to bulk import prospects' });
+              }
 
-            const ids = validProspects.map(p => p.id);
-            const placeholders = ids.map(() => '?').join(',');
+              importStats.inserted = validProspects.length;
+              res.set({
+                'X-LeadGen-Import-Received': String(importStats.received),
+                'X-LeadGen-Import-Valid': String(importStats.valid),
+                'X-LeadGen-Import-Inserted': String(importStats.inserted),
+                'X-LeadGen-Import-Skipped-Invalid': String(importStats.skippedInvalid),
+                'X-LeadGen-Import-Skipped-Duplicate-Email': String(
+                  importStats.skippedDupEmail,
+                ),
+                'X-LeadGen-Import-Skipped-Duplicate-Fallback': String(
+                  importStats.skippedDupFallback,
+                ),
+                'X-LeadGen-Import-Skipped-Suppressed': String(importStats.skippedSuppressed),
+                'X-LeadGen-Import-Skipped-Other': String(importStats.skippedOther),
+              });
+
+              const ids = validProspects.map(p => p.id);
+              const placeholders = ids.map(() => '?').join(',');
 
             db.all(
               `SELECT * FROM prospects WHERE id IN (${placeholders})`,
