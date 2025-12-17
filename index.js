@@ -38,6 +38,34 @@ function generateId(prefix) {
 }
 
 async function generateCampaignSuggestionsWithOpenAI(campaignId, fallbackSuggestions) {
+  const extractJson = (text) => {
+    if (!text || typeof text !== 'string') return null;
+    let cleaned = text.trim();
+    cleaned = cleaned.replace(/```json\s*([\s\S]*?)```/i, '$1').replace(/```\s*([\s\S]*?)```/i, '$1');
+    const firstBrace = cleaned.indexOf('{');
+    const firstBracket = cleaned.indexOf('[');
+    let start = -1;
+    let end = -1;
+    const starts = [firstBrace, firstBracket].filter((v) => v >= 0);
+    if (starts.length === 0) return null;
+    start = Math.min(...starts);
+    let depth = 0;
+    for (let i = start; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (ch === '{' || ch === '[') depth++;
+      if (ch === '}' || ch === ']') {
+        depth--;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    if (start >= 0 && end > start) {
+      return cleaned.slice(start, end);
+    }
+    return null;
+  };
   if (!openai || !process.env.OPENAI_API_KEY) {
     console.warn('OPENAI_API_KEY missing – using fallback suggestions.');
     return fallbackSuggestions;
@@ -93,7 +121,8 @@ Shape:
 
     let parsed;
     try {
-      parsed = JSON.parse(raw);
+      const jsonString = extractJson(raw);
+      parsed = jsonString ? JSON.parse(jsonString) : JSON.parse(raw);
     } catch (e) {
       console.warn('Failed to parse OpenAI suggestions JSON, using fallback.', e);
       return fallbackSuggestions;
