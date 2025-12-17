@@ -8,6 +8,7 @@ const {
   updateProspectStatus,
   updateSocialPostStatus,
   getProspectNotes,
+  getNotesByProspectIds,
   addProspectNote,
   getProspectById,
   getCampaignById,
@@ -624,6 +625,27 @@ app.post('/ai/sources/:sourceId/enrich-preview', async (req, res) => {
       }
     }
 
+    const prospectIds = prospects.map((p) => p.id);
+    let notesByProspect = new Map();
+    try {
+      notesByProspect = await getNotesByProspectIds(prospectIds);
+    } catch (err) {
+      console.error('Failed to fetch prospect notes for enrichment', err);
+    }
+
+    const buildNotesString = (prospectId) => {
+      const notes = notesByProspect.get(prospectId) || [];
+      if (!notes.length) return 'none available';
+      const maxNotes = notes.slice(0, 5);
+      const combined = maxNotes
+        .map((n) => (n.content || '').trim())
+        .filter(Boolean)
+        .join(' | ');
+      if (!combined) return 'none available';
+      const maxLen = 1000;
+      return combined.length > maxLen ? combined.slice(0, maxLen) : combined;
+    };
+
     const buildHeuristicPreview = (p) => {
       const companyName = p.companyName || null;
       const contactName = p.contactName || null;
@@ -711,6 +733,7 @@ app.post('/ai/sources/:sourceId/enrich-preview', async (req, res) => {
 
         const safeExcerpt =
           websiteExcerpt && websiteExcerpt.trim() !== '' ? websiteExcerpt : 'none available';
+        const notesText = buildNotesString(p.id);
 
         return [
           `PROSPECT_ID: ${p.id}`,
@@ -720,6 +743,7 @@ app.post('/ai/sources/:sourceId/enrich-preview', async (req, res) => {
           `WEBSITE: ${p.website || 'Unknown website'}`,
           `WEBSITE_DOMAIN: ${domain || 'none'}`,
           `WEBSITE_EXCERPT: "${safeExcerpt.replace(/"/g, '\\"')}"`,
+          `NOTES: "${notesText.replace(/"/g, '\\"')}"`,
           '---',
         ].join('\n');
       })
@@ -740,6 +764,7 @@ Tone and language constraints:
 CAMPAIGN CONTEXT:
 ${sourceIcpContext}
 Use this context to prioritize pains, fitScore, and messaging that match the target industry/role/angle.
+Use WEBSITE_EXCERPT and NOTES (if available) to infer pains and fit; NOTES should influence fitScore, primaryPain, and summary when present.
 For each prospect, output:
 - prospectId: the provided PROSPECT_ID
 - fitScore: integer 0-100

@@ -356,6 +356,37 @@ function getProspectNotes(prospectId) {
   });
 }
 
+function getNotesByProspectIds(prospectIds) {
+  return new Promise((resolve, reject) => {
+    if (!Array.isArray(prospectIds) || prospectIds.length === 0) {
+      return resolve(new Map());
+    }
+    const placeholders = prospectIds.map(() => '?').join(',');
+    db.all(
+      `
+      SELECT
+        prospectId AS prospectId,
+        note AS content,
+        createdAt AS createdAt
+      FROM prospect_notes
+      WHERE prospectId IN (${placeholders})
+      ORDER BY datetime(createdAt) DESC
+      `,
+      prospectIds,
+      (err, rows) => {
+        if (err) return reject(err);
+        const grouped = new Map();
+        for (const row of rows || []) {
+          const list = grouped.get(row.prospectId) || [];
+          list.push(row);
+          grouped.set(row.prospectId, list);
+        }
+        resolve(grouped);
+      },
+    );
+  });
+}
+
 function addProspectNote(prospectId, content) {
   return new Promise((resolve, reject) => {
     const id = `note_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -409,6 +440,7 @@ module.exports = {
   updateProspectStatus,
   updateSocialPostStatus,
   getProspectNotes,
+  getNotesByProspectIds,
   addProspectNote,
   getProspectById,
   getCampaignById,
