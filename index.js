@@ -112,15 +112,15 @@ async function generateCampaignSuggestionsWithOpenAI(campaignId, fallbackSuggest
   const extractJson = (text) => {
     if (!text || typeof text !== 'string') return null;
     let cleaned = text.trim();
-    cleaned = cleaned.replace(/```json\s*([\s\S]*?)```/i, '$1').replace(/```\s*([\s\S]*?)```/i, '$1');
+    cleaned = cleaned.replace(/```json\s*([\s\S]*?)```/gi, '$1');
+    cleaned = cleaned.replace(/```\s*([\s\S]*?)```/gi, '$1');
     const firstBrace = cleaned.indexOf('{');
     const firstBracket = cleaned.indexOf('[');
-    let start = -1;
-    let end = -1;
     const starts = [firstBrace, firstBracket].filter((v) => v >= 0);
     if (starts.length === 0) return null;
-    start = Math.min(...starts);
+    const start = Math.min(...starts);
     let depth = 0;
+    let end = -1;
     for (let i = start; i < cleaned.length; i++) {
       const ch = cleaned[i];
       if (ch === '{' || ch === '[') depth++;
@@ -1232,9 +1232,12 @@ app.post('/prospects', (req, res) => {
             normalizedDomain,
             normalizedContactName,
             origin,
-            suppressedAt
+            suppressedAt,
+            createdAt,
+            updatedAt,
+            lastContactedAt
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, datetime('now'), NULL, NULL)
         `,
         [
           id,
@@ -1688,9 +1691,13 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
           normalizedDomain,
           normalizedContactName,
           origin,
-          suppressedAt
+          suppressedAt,
+          createdAt,
+          updatedAt,
+          lastContactedAt,
+          archivedAt
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'), NULL, NULL, NULL)
       `;
 
         const stmt = db.prepare(insertSql);
