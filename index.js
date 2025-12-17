@@ -37,6 +37,77 @@ function generateId(prefix) {
   return `${prefix}_${timestamp}_${random}`;
 }
 
+function normalizeEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+  const trimmed = email.trim().toLowerCase();
+  return trimmed || null;
+}
+
+function normalizeName(name) {
+  if (!name || typeof name !== 'string') return null;
+  const trimmed = name.trim().toLowerCase().replace(/\s+/g, ' ');
+  return trimmed || null;
+}
+
+function extractDomainFromWebsiteOrEmail(website, email) {
+  if (website && typeof website === 'string') {
+    const value = website.trim();
+    if (value) {
+      try {
+        const url = value.startsWith('http') ? value : `https://${value}`;
+        const parsed = new URL(url);
+        const host = parsed.hostname.replace(/^www\./i, '');
+        if (host) return host.toLowerCase();
+      } catch (e) {
+        // ignore invalid website
+      }
+    }
+  }
+  if (email && typeof email === 'string' && email.includes('@')) {
+    const domainPart = email.split('@')[1]?.trim();
+    if (domainPart) return domainPart.replace(/^www\./i, '').toLowerCase();
+  }
+  return null;
+}
+
+function checkDuplicateProspect({ normalizedEmail, normalizedDomain, normalizedContactName }) {
+  return new Promise((resolve, reject) => {
+    if (normalizedEmail) {
+      db.get(
+        'SELECT id, suppressedAt FROM prospects WHERE normalizedEmail = ? LIMIT 1',
+        [normalizedEmail],
+        (err, row) => {
+          if (err) return reject(err);
+          if (row) return resolve(row);
+          if (normalizedDomain && normalizedContactName) {
+            db.get(
+              'SELECT id, suppressedAt FROM prospects WHERE normalizedDomain = ? AND normalizedContactName = ? LIMIT 1',
+              [normalizedDomain, normalizedContactName],
+              (err2, row2) => {
+                if (err2) return reject(err2);
+                return resolve(row2 || null);
+              },
+            );
+          } else {
+            return resolve(null);
+          }
+        },
+      );
+    } else if (normalizedDomain && normalizedContactName) {
+      db.get(
+        'SELECT id, suppressedAt FROM prospects WHERE normalizedDomain = ? AND normalizedContactName = ? LIMIT 1',
+        [normalizedDomain, normalizedContactName],
+        (err, row) => {
+          if (err) return reject(err);
+          return resolve(row || null);
+        },
+      );
+    } else {
+      resolve(null);
+    }
+  });
+}
+
 async function generateCampaignSuggestionsWithOpenAI(campaignId, fallbackSuggestions) {
   const extractJson = (text) => {
     if (!text || typeof text !== 'string') return null;
@@ -580,7 +651,7 @@ app.post('/ai/sources/:sourceId/enrich-preview', async (req, res) => {
 
     const prospects = await new Promise((resolve, reject) => {
       db.all(
-        'SELECT * FROM prospects WHERE sourceId = ? ORDER BY createdAt DESC',
+        'SELECT * FROM prospects WHERE sourceId = ? AND suppressedAt IS NULL ORDER BY createdAt DESC',
         [sourceId],
         (err, rows) => {
           if (err) return reject(err);
@@ -1017,15 +1088,19 @@ app.patch('/social-posts/:id', async (req, res) => {
 });
 
 app.get('/prospects', (req, res) => {
-  const { status, sourceId, ownerName, search, archived } = req.query;
+  const { status, sourceId, ownerName, search, archived, suppressed } = req.query;
 
   const whereClauses = [];
   const params = [];
 
-  if (archived === '1') {
-    whereClauses.push('archivedAt IS NOT NULL');
+  const includeSuppressed = suppressed === '1';
+  const includeArchived = archived === '1';
+
+  whereClauses.push(includeArchived ? 'archivedAt IS NOT NULL' : 'archivedAt IS NULL');
+  if (includeSuppressed) {
+    whereClauses.push('suppressedAt IS NOT NULL');
   } else {
-    whereClauses.push('archivedAt IS NULL');
+    whereClauses.push('suppressedAt IS NULL');
   }
 
   if (status && typeof status === 'string' && status.trim() !== '') {
@@ -1120,52 +1195,27 @@ app.post('/prospects', (req, res) => {
     tags,
     status,
     ownerName,
+    origin,
   } = req.body || {};
 
   const id = generateId('pros');
   const tagsValue = Array.isArray(tags) ? tags.join(',') : tags || null;
   const statusValue = status || 'uncontacted';
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedDomain = extractDomainFromWebsiteOrEmail(website, email);
+  const normalizedContactName = normalizeName(contactName);
+  const originValue =
+    origin && typeof origin === 'string' && origin.trim() ? origin.trim() : 'manual';
 
-  db.run(
-    `
-      INSERT INTO prospects (
-        id,
-        sourceId,
-        companyName,
-        contactName,
-        role,
-        email,
-        phone,
-        website,
-        tags,
-        status,
-        ownerName,
-        archivedAt
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-    `,
-    [
-      id,
-      sourceId || null,
-      companyName || null,
-      contactName || null,
-      role || null,
-      email || null,
-      phone || null,
-      website || null,
-      tagsValue,
-      statusValue,
-      ownerName || null,
-    ],
-    function insertProspectCallback(err) {
-      if (err) {
-        console.error('Error creating prospect:', err);
-        return res.status(500).json({ error: 'Failed to create prospect' });
+  checkDuplicateProspect({ normalizedEmail, normalizedDomain, normalizedContactName })
+    .then((existing) => {
+      if (existing) {
+        return res.status(409).json({ error: 'DUPLICATE', existingId: existing.id });
       }
 
-      db.get(
+      db.run(
         `
-          SELECT
+          INSERT INTO prospects (
             id,
             sourceId,
             companyName,
@@ -1173,28 +1223,84 @@ app.post('/prospects', (req, res) => {
             role,
             email,
             phone,
-        website,
-        tags,
-        status,
-        ownerName,
-        createdAt,
-        updatedAt,
-        lastContactedAt,
-        archivedAt
-      FROM prospects
-      WHERE id = ?
+            website,
+            tags,
+            status,
+            ownerName,
+            archivedAt,
+            normalizedEmail,
+            normalizedDomain,
+            normalizedContactName,
+            origin,
+            suppressedAt
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)
         `,
-        [id],
-        (fetchErr, row) => {
-          if (fetchErr) {
-            console.error('Error fetching created prospect:', fetchErr);
+        [
+          id,
+          sourceId || null,
+          companyName || null,
+          contactName || null,
+          role || null,
+          email || null,
+          phone || null,
+          website || null,
+          tagsValue,
+          statusValue,
+          ownerName || null,
+          normalizedEmail,
+          normalizedDomain,
+          normalizedContactName,
+          originValue,
+        ],
+        function insertProspectCallback(err) {
+          if (err) {
+            console.error('Error creating prospect:', err);
             return res.status(500).json({ error: 'Failed to create prospect' });
           }
-          return res.status(201).json(row);
+
+          db.get(
+            `
+              SELECT
+                id,
+                sourceId,
+                companyName,
+                contactName,
+                role,
+                email,
+                phone,
+                website,
+                tags,
+                status,
+                ownerName,
+                createdAt,
+                updatedAt,
+                lastContactedAt,
+                archivedAt,
+                normalizedEmail,
+                normalizedDomain,
+                normalizedContactName,
+                origin,
+                suppressedAt
+              FROM prospects
+              WHERE id = ?
+            `,
+            [id],
+            (fetchErr, row) => {
+              if (fetchErr) {
+                console.error('Error fetching created prospect:', fetchErr);
+                return res.status(500).json({ error: 'Failed to create prospect' });
+              }
+              return res.status(201).json(row);
+            },
+          );
         },
       );
-    },
-  );
+    })
+    .catch((err) => {
+      console.error('Error checking duplicate prospect:', err);
+      return res.status(500).json({ error: 'Failed to create prospect' });
+    });
 });
 
 app.patch('/prospects/:id', async (req, res) => {
@@ -1277,6 +1383,52 @@ app.patch('/prospects/:id/restore', async (req, res) => {
     console.error('Error in PATCH /prospects/:id/restore', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+app.patch('/prospects/:id/suppress', (req, res) => {
+  const { id } = req.params;
+  db.run(
+    `UPDATE prospects SET suppressedAt = datetime('now') WHERE id = ?`,
+    [id],
+    function suppressCallback(err) {
+      if (err) {
+        console.error('Error suppressing prospect:', err);
+        return res.status(500).json({ error: 'Failed to suppress prospect' });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Prospect not found' });
+      }
+      getProspectById(id)
+        .then((row) => res.json(row))
+        .catch((e) => {
+          console.error('Error fetching suppressed prospect:', e);
+          res.status(500).json({ error: 'Failed to suppress prospect' });
+        });
+    },
+  );
+});
+
+app.patch('/prospects/:id/unsuppress', (req, res) => {
+  const { id } = req.params;
+  db.run(
+    `UPDATE prospects SET suppressedAt = NULL WHERE id = ?`,
+    [id],
+    function unsuppressCallback(err) {
+      if (err) {
+        console.error('Error unsuppressing prospect:', err);
+        return res.status(500).json({ error: 'Failed to unsuppress prospect' });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Prospect not found' });
+      }
+      getProspectById(id)
+        .then((row) => res.json(row))
+        .catch((e) => {
+          console.error('Error fetching unsuppressed prospect:', e);
+          res.status(500).json({ error: 'Failed to unsuppress prospect' });
+        });
+    },
+  );
 });
 
 app.delete('/prospects/:id', async (req, res) => {
@@ -1401,65 +1553,125 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
 
   const validProspects = [];
 
-  for (const raw of prospects) {
-    if (!raw || typeof raw !== 'object') continue;
+  const existingLookup = new Map();
+  const suppressedLookup = new Set();
 
-    const {
-      companyName,
-      contactName,
-      role,
-      email,
-      phone,
-      website,
-      tags,
-      status,
-      ownerName,
-    } = raw;
+  db.all(
+    'SELECT id, normalizedEmail, normalizedDomain, normalizedContactName, suppressedAt FROM prospects',
+    [],
+    (lookupErr, rows) => {
+      if (lookupErr) {
+        console.error('Failed to load existing prospects for dedupe', lookupErr);
+        return res.status(500).json({ error: 'Failed to bulk import prospects' });
+      }
 
-    const hasIdentifier =
-      (companyName && String(companyName).trim() !== '') ||
-      (contactName && String(contactName).trim() !== '') ||
-      (email && String(email).trim() !== '');
+      for (const row of rows || []) {
+        if (row.normalizedEmail) {
+          existingLookup.set(`email:${row.normalizedEmail}`, row.id);
+          if (row.suppressedAt) suppressedLookup.add(`email:${row.normalizedEmail}`);
+        }
+        if (row.normalizedDomain && row.normalizedContactName) {
+          const key = `dn:${row.normalizedDomain}:${row.normalizedContactName}`;
+          existingLookup.set(key, row.id);
+          if (row.suppressedAt) suppressedLookup.add(key);
+        }
+      }
 
-    if (!hasIdentifier) {
-      continue;
-    }
+      const seen = new Set();
 
-    const id = generateId('pros');
+      for (const raw of prospects) {
+        if (!raw || typeof raw !== 'object') continue;
 
-    let tagsString = null;
-    if (Array.isArray(tags)) {
-      tagsString = tags.join(',');
-    } else if (typeof tags === 'string') {
-      tagsString = tags;
-    }
+        const {
+          companyName,
+          contactName,
+          role,
+          email,
+          phone,
+          website,
+          tags,
+          status,
+          ownerName,
+          origin,
+        } = raw;
 
-    const finalStatus =
-      typeof status === 'string' && status.trim() !== ''
-        ? status.trim()
-        : 'uncontacted';
+        const hasIdentifier =
+          (companyName && String(companyName).trim() !== '') ||
+          (contactName && String(contactName).trim() !== '') ||
+          (email && String(email).trim() !== '');
 
-    validProspects.push({
-      id,
-      sourceId: sourceId || null,
-      companyName: companyName ?? null,
-      contactName: contactName ?? null,
-      role: role ?? null,
-      email: email ?? null,
-      phone: phone ?? null,
-      website: website ?? null,
-      tags: tagsString,
-      status: finalStatus,
-      ownerName: ownerName ?? null,
-    });
-  }
+        if (!hasIdentifier) {
+          continue;
+        }
 
-  if (validProspects.length === 0) {
-    return res.status(400).json({ error: 'No valid prospects to import' });
-  }
+        const normalizedEmail = normalizeEmail(email);
+        const normalizedDomain = extractDomainFromWebsiteOrEmail(website, email);
+        const normalizedContactName = normalizeName(contactName);
 
-  db.serialize(() => {
-    const insertSql = `
+        const keyEmail = normalizedEmail ? `email:${normalizedEmail}` : null;
+        const keyDomain =
+          normalizedDomain && normalizedContactName
+            ? `dn:${normalizedDomain}:${normalizedContactName}`
+            : null;
+
+        const duplicateKey =
+          (keyEmail && existingLookup.has(keyEmail)) ||
+          (keyDomain && existingLookup.has(keyDomain)) ||
+          (keyEmail && seen.has(keyEmail)) ||
+          (keyDomain && seen.has(keyDomain));
+        const suppressedHit =
+          (keyEmail && suppressedLookup.has(keyEmail)) ||
+          (keyDomain && suppressedLookup.has(keyDomain));
+
+        if (duplicateKey || suppressedHit) {
+          continue;
+        }
+
+        if (keyEmail) seen.add(keyEmail);
+        if (keyDomain) seen.add(keyDomain);
+
+        const id = generateId('pros');
+
+        let tagsString = null;
+        if (Array.isArray(tags)) {
+          tagsString = tags.join(',');
+        } else if (typeof tags === 'string') {
+          tagsString = tags;
+        }
+
+        const finalStatus =
+          typeof status === 'string' && status.trim() !== ''
+            ? status.trim()
+            : 'uncontacted';
+
+        const originValue =
+          origin && typeof origin === 'string' && origin.trim() ? origin.trim() : 'purchased';
+
+        validProspects.push({
+          id,
+          sourceId: sourceId || null,
+          companyName: companyName ?? null,
+          contactName: contactName ?? null,
+          role: role ?? null,
+          email: email ?? null,
+          phone: phone ?? null,
+          website: website ?? null,
+          tags: tagsString,
+          status: finalStatus,
+          ownerName: ownerName ?? null,
+          normalizedEmail,
+          normalizedDomain,
+          normalizedContactName,
+          origin: originValue,
+        });
+      }
+
+      if (validProspects.length === 0) {
+        return res.status(400).json({ error: 'No valid prospects to import' });
+      }
+
+      db.serialize(() => {
+        const insertSql = `
         INSERT INTO prospects (
           id,
           sourceId,
@@ -1471,61 +1683,72 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
           website,
           tags,
           status,
-          ownerName
+          ownerName,
+          normalizedEmail,
+          normalizedDomain,
+          normalizedContactName,
+          origin,
+          suppressedAt
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
       `;
 
-    const stmt = db.prepare(insertSql);
+        const stmt = db.prepare(insertSql);
 
-    try {
-      for (const p of validProspects) {
-        stmt.run(
-          p.id,
-          p.sourceId,
-          p.companyName,
-          p.contactName,
-          p.role,
-          p.email,
-          p.phone,
-          p.website,
-          p.tags,
-          p.status,
-          p.ownerName,
-        );
-      }
+        try {
+          for (const p of validProspects) {
+            stmt.run(
+              p.id,
+              p.sourceId,
+              p.companyName,
+              p.contactName,
+              p.role,
+              p.email,
+              p.phone,
+              p.website,
+              p.tags,
+              p.status,
+              p.ownerName,
+              p.normalizedEmail,
+              p.normalizedDomain,
+              p.normalizedContactName,
+              p.origin,
+            );
+          }
 
-      stmt.finalize(err => {
-        if (err) {
-          console.error('Failed to bulk import prospects (finalize)', err);
-          return res.status(500).json({ error: 'Failed to bulk import prospects' });
-        }
-
-        const ids = validProspects.map(p => p.id);
-        const placeholders = ids.map(() => '?').join(',');
-
-        db.all(
-          `SELECT * FROM prospects WHERE id IN (${placeholders})`,
-          ids,
-          (selectErr, rows) => {
-            if (selectErr) {
-              console.error('Failed to fetch imported prospects', selectErr);
+          stmt.finalize(err => {
+            if (err) {
+              console.error('Failed to bulk import prospects (finalize)', err);
               return res.status(500).json({ error: 'Failed to bulk import prospects' });
             }
-            res.status(201).json(rows);
-          },
-        );
+
+            const ids = validProspects.map(p => p.id);
+            const placeholders = ids.map(() => '?').join(',');
+
+            db.all(
+              `SELECT * FROM prospects WHERE id IN (${placeholders})`,
+              ids,
+              (selectErr, rows) => {
+                if (selectErr) {
+                  console.error('Failed to fetch imported prospects', selectErr);
+                  return res.status(500).json({ error: 'Failed to bulk import prospects' });
+                }
+                res.status(201).json(rows);
+              },
+            );
+          });
+        } catch (e) {
+          console.error('Failed to bulk import prospects', e);
+          try {
+            stmt.finalize();
+          } catch (_) {
+            // ignore
+          }
+          return res.status(500).json({ error: 'Failed to bulk import prospects' });
+        }
       });
-    } catch (e) {
-      console.error('Failed to bulk import prospects', e);
-      try {
-        stmt.finalize();
-      } catch (_) {
-        // ignore
-      }
-      return res.status(500).json({ error: 'Failed to bulk import prospects' });
-    }
-  });
+    },
+  );
 });
 
 app.listen(PORT, () => {

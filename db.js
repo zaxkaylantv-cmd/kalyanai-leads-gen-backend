@@ -73,6 +73,11 @@ function initDb() {
       )
     `);
     safeAddProspectColumn('archivedAt TEXT');
+    safeAddProspectColumn('normalizedEmail TEXT');
+    safeAddProspectColumn('normalizedDomain TEXT');
+    safeAddProspectColumn('normalizedContactName TEXT');
+    safeAddProspectColumn('origin TEXT');
+    safeAddProspectColumn('suppressedAt TEXT');
 
     db.run(`
       CREATE TABLE IF NOT EXISTS prospect_notes (
