@@ -963,10 +963,16 @@ app.patch('/social-posts/:id', async (req, res) => {
 });
 
 app.get('/prospects', (req, res) => {
-  const { status, sourceId, ownerName, search } = req.query;
+  const { status, sourceId, ownerName, search, archived } = req.query;
 
   const whereClauses = [];
   const params = [];
+
+  if (archived === '1') {
+    whereClauses.push('archivedAt IS NOT NULL');
+  } else {
+    whereClauses.push('archivedAt IS NULL');
+  }
 
   if (status && typeof status === 'string' && status.trim() !== '') {
     whereClauses.push('status = ?');
@@ -1029,7 +1035,8 @@ app.get('/prospects/:id', (req, res) => {
         ownerName,
         createdAt,
         updatedAt,
-        lastContactedAt
+        lastContactedAt,
+        archivedAt
       FROM prospects
       WHERE id = ?
     `,
@@ -1078,9 +1085,10 @@ app.post('/prospects', (req, res) => {
         website,
         tags,
         status,
-        ownerName
+        ownerName,
+        archivedAt
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     `,
     [
       id,
@@ -1111,15 +1119,16 @@ app.post('/prospects', (req, res) => {
             role,
             email,
             phone,
-            website,
-            tags,
-            status,
-            ownerName,
-            createdAt,
-            updatedAt,
-            lastContactedAt
-          FROM prospects
-          WHERE id = ?
+        website,
+        tags,
+        status,
+        ownerName,
+        createdAt,
+        updatedAt,
+        lastContactedAt,
+        archivedAt
+      FROM prospects
+      WHERE id = ?
         `,
         [id],
         (fetchErr, row) => {
@@ -1156,6 +1165,92 @@ app.patch('/prospects/:id', async (req, res) => {
     return res.json(updated);
   } catch (err) {
     console.error('Error in PATCH /prospects/:id', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.patch('/prospects/:id/archive', async (req, res) => {
+  try {
+    const { id } = req.params;
+    db.run(
+      `UPDATE prospects SET archivedAt = datetime('now') WHERE id = ?`,
+      [id],
+      function archiveCallback(err) {
+        if (err) {
+          console.error('Error archiving prospect:', err);
+          return res.status(500).json({ error: 'Failed to archive prospect' });
+        }
+        if (this.changes === 0) {
+          return res.status(404).json({ error: 'Prospect not found' });
+        }
+        getProspectById(id)
+          .then((row) => res.json(row))
+          .catch((e) => {
+            console.error('Error fetching archived prospect:', e);
+            res.status(500).json({ error: 'Failed to archive prospect' });
+          });
+      },
+    );
+  } catch (err) {
+    console.error('Error in PATCH /prospects/:id/archive', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.patch('/prospects/:id/restore', async (req, res) => {
+  try {
+    const { id } = req.params;
+    db.run(
+      `UPDATE prospects SET archivedAt = NULL WHERE id = ?`,
+      [id],
+      function restoreCallback(err) {
+        if (err) {
+          console.error('Error restoring prospect:', err);
+          return res.status(500).json({ error: 'Failed to restore prospect' });
+        }
+        if (this.changes === 0) {
+          return res.status(404).json({ error: 'Prospect not found' });
+        }
+        getProspectById(id)
+          .then((row) => res.json(row))
+          .catch((e) => {
+            console.error('Error fetching restored prospect:', e);
+            res.status(500).json({ error: 'Failed to restore prospect' });
+          });
+      },
+    );
+  } catch (err) {
+    console.error('Error in PATCH /prospects/:id/restore', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/prospects/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const prospect = await getProspectById(id);
+    if (!prospect) {
+      return res.status(404).json({ error: 'Prospect not found' });
+    }
+    if (!prospect.archivedAt) {
+      return res.status(400).json({ error: 'Prospect must be archived before deletion' });
+    }
+    db.run(
+      `DELETE FROM prospects WHERE id = ?`,
+      [id],
+      function deleteCallback(err) {
+        if (err) {
+          console.error('Error deleting prospect:', err);
+          return res.status(500).json({ error: 'Failed to delete prospect' });
+        }
+        if (this.changes === 0) {
+          return res.status(404).json({ error: 'Prospect not found' });
+        }
+        return res.json({ success: true, deletedId: id });
+      },
+    );
+  } catch (err) {
+    console.error('Error in DELETE /prospects/:id', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1212,7 +1307,7 @@ app.post('/prospects/:id/push-to-leaddesk', async (req, res) => {
       ownerName:
         prospect.ownerName && typeof prospect.ownerName === 'string' && prospect.ownerName.trim()
           ? prospect.ownerName.trim()
-          : 'Unassigned',
+          : 'Zax Kalyan',
     };
 
     const response = await fetch(`${LEADDESK_API_BASE}/leads`, {

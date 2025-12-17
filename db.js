@@ -44,6 +44,14 @@ function initDb() {
     safeAddColumn('roleFocus TEXT');
     safeAddColumn('mainAngle TEXT');
 
+    function safeAddProspectColumn(columnDef) {
+      db.run(`ALTER TABLE prospects ADD COLUMN ${columnDef}`, (err) => {
+        if (err && !String(err.message).toLowerCase().includes('duplicate column')) {
+          console.error('Error adding column to prospects:', columnDef, err);
+        }
+      });
+    }
+
     db.run(`
       CREATE TABLE IF NOT EXISTS prospects (
         id TEXT PRIMARY KEY,
@@ -55,6 +63,7 @@ function initDb() {
         phone TEXT,
         website TEXT,
         tags TEXT,
+        archivedAt TEXT,
         status TEXT NOT NULL DEFAULT 'uncontacted',
         ownerName TEXT,
         createdAt TEXT NOT NULL DEFAULT (datetime('now')),
@@ -63,6 +72,7 @@ function initDb() {
         FOREIGN KEY (sourceId) REFERENCES sources(id) ON DELETE SET NULL
       )
     `);
+    safeAddProspectColumn('archivedAt TEXT');
 
     db.run(`
       CREATE TABLE IF NOT EXISTS prospect_notes (
