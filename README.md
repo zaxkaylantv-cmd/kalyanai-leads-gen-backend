@@ -11,10 +11,6 @@ Express service (main entry `index.js`) that powers sources, prospects, campaign
 2) Create `.env` with variable names above (no secrets committed).
 3) Run: `node index.js` (defaults to PORT 3004).
 
-### Production notes
-- PM2 process name: `leads-gen-backend` (existing deployment).
-- Nginx proxies `/leads-gen-api/` to `127.0.0.1:3004` (frontend uses `BASE_URL="/leads-gen-api"`).
-
 ### Database
 - SQLite file: `data/leads-gen.sqlite` (created by `db.js`).
 - Tables (high level): sources (+ ICP fields), prospects (status, archivedAt), prospect_notes, outreach_steps, campaigns, social_posts (+ status), post_metrics, domains cache.
@@ -31,6 +27,28 @@ Express service (main entry `index.js`) that powers sources, prospects, campaign
 - Notes: `GET /prospects/:id/notes`, `POST /prospects/:id/notes`
 - Lead Desk: `POST /prospects/:id/push-to-leaddesk`
 - Bulk import: `POST /sources/:sourceId/prospects/bulk`
+
+### Prospect guardrails
+- Normalised fields stored: `normalizedEmail`, `normalizedDomain`, `normalizedContactName`.
+- Dedupe rules: primary on `normalizedEmail`; fallback on `normalizedDomain + normalizedContactName` only when email is missing.
+- Origin: defaults to `manual` for single create, `purchased` for bulk import unless a non-empty `origin` is provided.
+- Suppression: `suppressedAt` marks suppressed rows; hidden from `GET /prospects` unless `?suppressed=1` is passed; suppressed rows are excluded from enrichment payloads.
+
+### Suppression endpoints
+- `PATCH /prospects/:id/suppress`
+- `PATCH /prospects/:id/unsuppress`
+
+### Bulk import reporting
+- Response headers: `X-LeadGen-Import-Received`, `X-LeadGen-Import-Valid`, `X-LeadGen-Import-Inserted`, `X-LeadGen-Import-Skipped-Invalid`, `X-LeadGen-Import-Skipped-Duplicate-Email`, `X-LeadGen-Import-Skipped-Duplicate-Fallback`, `X-LeadGen-Import-Skipped-Suppressed`, `X-LeadGen-Import-Skipped-Other`.
+- Response body remains the inserted prospect rows array.
+
+### Enrichment context
+- Uses WEBSITE_EXCERPT (domain fetch + cache) plus ICP campaign context.
+- Includes NOTES: recent prospect notes concatenated and truncated before being sent for enrichment.
+
+### Production notes
+- PM2 process name: `leads-gen-backend` (existing deployment).
+- Nginx proxies `/leads-gen-api/` to `127.0.0.1:3004` (frontend uses `BASE_URL="/leads-gen-api"`).
 
 ### Troubleshooting
 - Missing `OPENAI_API_KEY`: AI suggestions fall back to defaults.
