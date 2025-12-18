@@ -391,10 +391,14 @@ app.get('/debug/domain-profile', async (req, res) => {
 });
 
 app.get('/sources', (req, res) => {
+  const includeArchived = req.query.archived === '1';
+  const whereClause = includeArchived ? 'WHERE archivedAt IS NOT NULL' : 'WHERE archivedAt IS NULL';
+
   db.all(
     `
-      SELECT id, name, type, description, metadata, createdAt, targetIndustry, companySize, roleFocus, mainAngle
+      SELECT id, name, type, description, metadata, archivedAt, createdAt, targetIndustry, companySize, roleFocus, mainAngle
       FROM sources
+      ${whereClause}
       ORDER BY datetime(createdAt) DESC
     `,
     [],
@@ -475,7 +479,7 @@ app.post('/sources', (req, res) => {
 
       db.get(
         `
-          SELECT id, name, type, description, metadata, createdAt, targetIndustry, companySize, roleFocus, mainAngle
+          SELECT id, name, type, description, metadata, archivedAt, createdAt, targetIndustry, companySize, roleFocus, mainAngle
           FROM sources
           WHERE id = ?
         `,
@@ -532,6 +536,108 @@ app.patch('/sources/:id', (req, res) => {
 
     return res.json(updated);
   });
+});
+
+app.patch('/sources/:id/archive', (req, res) => {
+  const { id } = req.params;
+  const archivedAt = new Date().toISOString();
+
+  db.run(
+    `UPDATE sources SET archivedAt = ? WHERE id = ?`,
+    [archivedAt, id],
+    function archiveCallback(err) {
+      if (err) {
+        console.error('Error archiving source:', err);
+        return res.status(500).json({ error: 'Failed to archive source' });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Source not found' });
+      }
+      getSourceById(id)
+        .then((row) => res.json(row))
+        .catch((fetchErr) => {
+          console.error('Error fetching archived source:', fetchErr);
+          res.status(500).json({ error: 'Failed to archive source' });
+        });
+    },
+  );
+});
+
+app.patch('/sources/:id/restore', (req, res) => {
+  const { id } = req.params;
+
+  db.run(
+    `UPDATE sources SET archivedAt = NULL WHERE id = ?`,
+    [id],
+    function restoreCallback(err) {
+      if (err) {
+        console.error('Error restoring source:', err);
+        return res.status(500).json({ error: 'Failed to restore source' });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Source not found' });
+      }
+      getSourceById(id)
+        .then((row) => res.json(row))
+        .catch((fetchErr) => {
+          console.error('Error fetching restored source:', fetchErr);
+          res.status(500).json({ error: 'Failed to restore source' });
+        });
+    },
+  );
+});
+
+app.delete('/sources/:id', (req, res) => {
+  const { id } = req.params;
+
+  db.get(
+    `SELECT id, archivedAt FROM sources WHERE id = ?`,
+    [id],
+    (sourceErr, sourceRow) => {
+      if (sourceErr) {
+        console.error('Error checking source before delete:', sourceErr);
+        return res.status(500).json({ error: 'Failed to delete source' });
+      }
+      if (!sourceRow) {
+        return res.status(404).json({ error: 'Source not found' });
+      }
+      if (!sourceRow.archivedAt) {
+        return res.status(400).json({ error: 'Source must be archived before deletion' });
+      }
+
+      db.get(
+        `SELECT COUNT(*) as count FROM prospects WHERE sourceId = ?`,
+        [id],
+        (countErr, countRow) => {
+          if (countErr) {
+            console.error('Error checking source prospects before delete:', countErr);
+            return res.status(500).json({ error: 'Failed to delete source' });
+          }
+          const prospectCount = Number(countRow?.count || 0);
+          if (prospectCount > 0) {
+            return res
+              .status(400)
+              .json({ error: 'Cannot delete source with existing prospects' });
+          }
+
+          db.run(
+            `DELETE FROM sources WHERE id = ?`,
+            [id],
+            function deleteCallback(deleteErr) {
+              if (deleteErr) {
+                console.error('Error deleting source:', deleteErr);
+                return res.status(500).json({ error: 'Failed to delete source' });
+              }
+              if (this.changes === 0) {
+                return res.status(404).json({ error: 'Source not found' });
+              }
+              return res.json({ success: true, deletedId: id });
+            },
+          );
+        },
+      );
+    },
+  );
 });
 
 app.get('/campaigns', (req, res) => {

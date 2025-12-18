@@ -27,6 +27,7 @@ function initDb() {
         type TEXT,
         description TEXT,
         metadata TEXT,
+        archivedAt TEXT,
         createdAt TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `);
@@ -43,6 +44,7 @@ function initDb() {
     safeAddColumn('companySize TEXT');
     safeAddColumn('roleFocus TEXT');
     safeAddColumn('mainAngle TEXT');
+    safeAddColumn('archivedAt TEXT');
 
     function safeAddProspectColumn(columnDef) {
       db.run(`ALTER TABLE prospects ADD COLUMN ${columnDef}`, (err) => {
@@ -242,7 +244,7 @@ function getSourceById(id) {
   return new Promise((resolve, reject) => {
     db.get(
       `
-        SELECT id, name, type, description, metadata, createdAt, targetIndustry, companySize, roleFocus, mainAngle
+        SELECT id, name, type, description, metadata, archivedAt, createdAt, targetIndustry, companySize, roleFocus, mainAngle
         FROM sources
         WHERE id = ?
       `,
