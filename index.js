@@ -1799,8 +1799,27 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
         });
       }
 
+      const sendStatsHeaders = () => {
+        res.set({
+          'X-LeadGen-Import-Received': String(importStats.received),
+          'X-LeadGen-Import-Valid': String(importStats.valid),
+          'X-LeadGen-Import-Inserted': String(importStats.inserted),
+          'X-LeadGen-Import-Skipped-Invalid': String(importStats.skippedInvalid),
+          'X-LeadGen-Import-Skipped-Duplicate-Email': String(
+            importStats.skippedDupEmail,
+          ),
+          'X-LeadGen-Import-Skipped-Duplicate-Fallback': String(
+            importStats.skippedDupFallback,
+          ),
+          'X-LeadGen-Import-Skipped-Suppressed': String(importStats.skippedSuppressed),
+          'X-LeadGen-Import-Skipped-Other': String(importStats.skippedOther),
+        });
+      };
+
       if (validProspects.length === 0) {
-        return res.status(400).json({ error: 'No valid prospects to import' });
+        importStats.inserted = 0;
+        sendStatsHeaders();
+        return res.status(200).json([]);
       }
 
       db.serialize(() => {
@@ -1860,20 +1879,7 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
               }
 
               importStats.inserted = validProspects.length;
-              res.set({
-                'X-LeadGen-Import-Received': String(importStats.received),
-                'X-LeadGen-Import-Valid': String(importStats.valid),
-                'X-LeadGen-Import-Inserted': String(importStats.inserted),
-                'X-LeadGen-Import-Skipped-Invalid': String(importStats.skippedInvalid),
-                'X-LeadGen-Import-Skipped-Duplicate-Email': String(
-                  importStats.skippedDupEmail,
-                ),
-                'X-LeadGen-Import-Skipped-Duplicate-Fallback': String(
-                  importStats.skippedDupFallback,
-                ),
-                'X-LeadGen-Import-Skipped-Suppressed': String(importStats.skippedSuppressed),
-                'X-LeadGen-Import-Skipped-Other': String(importStats.skippedOther),
-              });
+              sendStatsHeaders();
 
               const ids = validProspects.map(p => p.id);
               const placeholders = ids.map(() => '?').join(',');
@@ -1886,7 +1892,7 @@ app.post('/sources/:sourceId/prospects/bulk', (req, res) => {
                   console.error('Failed to fetch imported prospects', selectErr);
                   return res.status(500).json({ error: 'Failed to bulk import prospects' });
                 }
-                res.status(201).json(rows);
+                res.status(importStats.inserted > 0 ? 201 : 200).json(rows);
               },
             );
           });
